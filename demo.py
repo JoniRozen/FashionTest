@@ -11,62 +11,37 @@ config_file = 'experiments/deepfashion2/hrnet/w48_384x288_adam_lr1e-3.yaml'
 cfg.merge_from_file(config_file)
 
 # Modify the configuration for 600x600 output
-cfg.defrost()  # Unfreeze config to modify it
-cfg.MODEL.IMAGE_SIZE = [600, 600]  # Set new image size
-cfg.MODEL.EXTRA.STAGE4.NUM_CHANNELS = [48, 96, 192, 384]  # Adjust channels if needed
-cfg.MODEL.EXTRA.FINAL_CONV_KERNEL = 1  # Ensure final conv kernel is 1x1
-cfg.MODEL.HEATMAP_SIZE = [600, 600]  # Set heatmap size to match desired output
+cfg.defrost()
+cfg.MODEL.IMAGE_SIZE = [600, 600]
+cfg.MODEL.HEATMAP_SIZE = [600, 600]
 cfg.freeze()
-
-# Load the HRNet model
-model_path = 'model.pth'  # Path to the pretrained model
 
 def modify_model_for_size(model):
     """Modify the model's final layers to output 600x600"""
-    # Get the last deconv layer
-    last_layer = list(model.final_layer.children())[-1]
-    
-    # Create new final layer with same channels but different output size
-    new_final_layer = torch.nn.Sequential(
-        # Upsampling to reach 600x600
-        torch.nn.ConvTranspose2d(
-            in_channels=last_layer.in_channels,
-            out_channels=last_layer.out_channels,
-            kernel_size=4,  # Adjust kernel size for upsampling
-            stride=2,
-            padding=1,
-            output_padding=0,
-            bias=False
-        ),
-        torch.nn.BatchNorm2d(last_layer.out_channels),
-        torch.nn.ReLU(inplace=True),
-        # Final 1x1 conv to maintain channel dimension
-        torch.nn.Conv2d(
-            in_channels=last_layer.out_channels,
-            out_channels=last_layer.out_channels,
-            kernel_size=1,
-            stride=1,
-            padding=0
-        )
-    )
-    
-    # Replace the final layer
-    model.final_layer = new_final_layer
-    return model
+    # Add an upsampling layer after the final layer
+    class ModifiedHRNet(torch.nn.Module):
+        def __init__(self, base_model):
+            super(ModifiedHRNet, self).__init__()
+            self.base_model = base_model
+            self.upsample = torch.nn.Upsample(
+                size=(600, 600),
+                mode='bilinear',
+                align_corners=True
+            )
+
+        def forward(self, x):
+            x = self.base_model(x)
+            x = self.upsample(x)
+            return x
+
+    return ModifiedHRNet(model)
 
 # Load and modify the model
 model = get_pose_net(cfg, is_train=False)
 model = modify_model_for_size(model)
 
-# Load pretrained weights and adjust for modified architecture
-pretrained_dict = torch.load(model_path, map_location='cpu')
-model_dict = model.state_dict()
-
-# Filter out incompatible keys
-pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
-model_dict.update(pretrained_dict)
-model.load_state_dict(model_dict, strict=False)
-
+# Load pretrained weights
+model.base_model.load_state_dict(torch.load("model.pth", map_location='cpu'))
 model = model.double()
 model.eval()
 
@@ -95,7 +70,6 @@ def predict_landmarks(image_tensor):
         for i in range(heatmaps.shape[0]):
             heatmap = heatmaps[i]
             y, x = np.unravel_index(np.argmax(heatmap), heatmap.shape)
-            # Scale coordinates to original image size if needed
             landmarks.append((x, y))
         
         return landmarks
